@@ -1,0 +1,292 @@
+# 현재 상태 요약
+
+이 문서는 `parking-radar`의 현재 구현 상태와 운영 시 알아야 할 결정을 한 곳에 모아둔 문서다.  
+세부 기능 문서가 흩어져 있을 때 먼저 이 문서를 읽고, 필요하면 링크된 개별 문서로 내려가는 것을 권장한다.
+
+최종 확인 기준일:
+- `2026-04-26`
+
+## 1. 현재 구현 범위
+
+현재 구현된 주요 기능은 다음과 같다.
+
+- 공항별 현재 주차 현황 조회
+- 세부 주차장 단위 조회
+- 최근 7일, 30분 단위 시계열
+- 시계열 hover / touch 툴팁
+- 시계열 X축 6시간 단위 라벨
+- 시계열 계단형(step) 차트
+- 시계열 최신 포인트 기본 활성화 및 오른쪽 최신 구간 우선 노출
+- 요일 x 시간 평균 잔여 주차면 히트맵
+- 평균으로 가장 빠듯한 시간 / 가장 여유 있는 시간 요약
+- 요일별 24시간 상세 패턴 카드
+- 요일별 임계 달성 시간
+- 날짜별 임계 달성 시간 히스토리
+- 10대 / 50대 임계치 이벤트 분석
+- 공항/세부 주차장 스코프 전환
+- 마지막으로 본 공항 / 세부 주차장 복원
+- 주차 요금 계산
+- 웹 UI에서 수동 수집 실행
+- 수동 수집 쿨다운 제한
+- 모바일 / 데스크톱 반응형 대응
+
+## 2. 기본 실행 모드
+
+로컬 `docker compose up -d` 기본 실행은 개발용 기준이다.
+
+기본값:
+
+- `seed_sample_data=true`
+- `enable_scheduler=false`
+- `use_sample_client_when_no_key=true`
+
+즉, 별도 설정 없이 띄우면:
+
+- 샘플 데이터가 들어간다.
+- 자동 수집은 돌지 않는다.
+- 인증키가 없어도 앱은 동작한다.
+- 이 상태에서는 `client_mode=sample`로 보는 것이 맞다.
+
+실제 수집 모드 여부는 항상 아래 API로 확인한다.
+
+```bash
+curl http://localhost:8000/admin/collector-status
+```
+
+핵심 확인 필드:
+
+- `client_mode`
+- `scheduler_enabled`
+- `data_go_kr_service_key_configured`
+- `enabled_sources`
+
+## 3. 데이터 소스 결정
+
+현재 주 수집원:
+
+- `15056803` 한국공항공사 공항 주차장 정보
+
+보조 / 선택 소스:
+
+- `15063437` 한국공항공사 전국공항 주차장 혼잡도
+- `15038474` 한국공항공사 전국공항 주차요금
+- `15095047` 인천국제공항공사 주차 정보
+
+현재 코드 기준 운영 판단:
+
+- 한국공항공사 실시간 주차 현황은 `15056803`을 기본으로 사용한다.
+- `15063437`은 혼잡도 참고용 후보지만 기본 수집원은 아니다.
+- `15038474`와 `15095047`는 별도 플래그를 켰을 때만 시도한다.
+
+관련 문서:
+- [data-sources.md](</C:/Users/digit/OneDrive/문서/New project/docs/data-sources.md>)
+
+## 4. 공항별 세부 주차장 기준
+
+현재 화면과 샘플/파서 기준으로 특히 주의한 공항은 다음과 같다.
+
+### 김해 `PUS`
+
+- `P1 여객주차장`
+- `P2 여객주차장`
+- `P3 여객(화물)주차장`
+
+### 김포 `GMP`
+
+- `국내선 제1주차장`
+- `국내선 제2주차장`
+- `국제선 지하주차장`
+- `국제선 주차빌딩`
+
+### 제주 `CJU`
+
+- `P1 주차장`
+- `P2 장기주차장`
+- `화물터미널주차장`
+
+### 인천 `ICN`
+
+샘플 기준으로 아래 구조를 둔다.
+
+- `T1 단기주차장`
+- `T1 장기주차장 P1 / P2 / P3`
+- `T1 예약주차장`
+- `T2 단기주차장`
+- `T2 장기주차장`
+- `T2 예약주차장`
+
+이름 표기가 원본 API에서 흔들리는 경우가 있어, 파서와 시드 데이터 모두 정규화된 lot 이름 기준을 유지한다.
+
+## 5. 시각 기준
+
+시각은 아래처럼 나뉜다.
+
+- DB 저장 기준: UTC
+- API 응답 기준: UTC ISO 8601
+- 브라우저 표시 기준: KST
+
+웹 UI에서 보이는 대표 시각:
+
+- `데이터 기준 시각`
+  - 원본 데이터가 실제로 관측된 시각
+- `수집기 마지막 동기화`
+  - 전체 시스템 기준 마지막 적재 시각
+
+row-level `collected_at`은 백엔드에 남아 있지만, 메인 UI에서는 직접 노출하지 않는다.
+
+관련 문서:
+- [time-and-collector.md](</C:/Users/digit/OneDrive/문서/New project/docs/time-and-collector.md>)
+
+## 6. 수동 수집 버튼
+
+웹 UI의 `지금 수집` 버튼은 `POST /admin/collect`를 호출한다.
+
+동작 규칙:
+
+- 마지막 적재 후 제한 시간이 지나지 않았으면 실행하지 않는다.
+- 프론트엔드는 먼저 상태를 확인해 사용자 메시지를 보여준다.
+- 백엔드도 같은 규칙으로 다시 검증한다.
+- 외부 API 한도 초과 상태이면 백엔드는 `429`로 막고 다음 재시도 가능 시각을 안내한다.
+
+성공 시 예시:
+
+- `즉시 수집을 완료했습니다. 신규 스냅샷 10건을 저장했습니다.`
+
+실패 시 예시:
+
+- `마지막 업데이트 후 20분이 지나지 않았습니다. 04.26 20:49 KST 이후 다시 시도해 주세요.`
+
+## 7. 스케줄러와 중복 저장
+
+자동 수집은 `ENABLE_SCHEDULER=true`일 때만 돈다.
+
+중복 저장 기준:
+
+- `parking_lot_id + observed_at + source`
+
+따라서 다음 상황은 정상이다.
+
+1. 수집 자체는 성공했다.
+2. 원본 API의 `observed_at`이 이전 수집과 같다.
+3. 중복 저장을 막아서 `snapshot_count=0`이 나온다.
+
+이 경우 해석은 아래처럼 한다.
+
+- `raw_response_count=1`이면 호출은 성공
+- `status=success`이면 실행은 정상
+- `snapshot_count=0`이면 중복 저장 방지 가능성 먼저 확인
+
+추가 규칙:
+
+- `collector-status`에 `upstream_rate_limited=true`가 보이면 외부 API 쿼터 보호 상태다.
+- 이때는 다음 KST 자정 5분 뒤까지 수집기가 자동으로 API 호출을 건너뛴다.
+- 같은 인증키를 쓰는 live 수집기는 동시에 하나만 유지한다.
+
+## 8. 프론트엔드 동작 기준
+
+### 스코프 전환
+
+- 공항 전체 선택:
+  - 활성 주차장을 합산해서 보여준다.
+- 세부 주차장 선택:
+  - 선택한 주차장 하나 기준으로 모든 패널이 바뀐다.
+- 마지막 선택 정보는 브라우저 localStorage에 저장되고 다음 접속 시 복원된다.
+
+스코프가 함께 바뀌는 패널:
+
+- 현재 잔여 주차면
+- 현재 점유율
+- 최근 7일 시계열
+- 요일 x 시간 평균 잔여 주차면
+- 요일별 시간대 상세 패턴
+- 요일별 임계 달성 시간
+- 날짜별 임계 달성 시간 히스토리
+- 임계치 이벤트
+- 시계열의 마지막 값은 `지금 주차 여유`와 같은 계산 기준으로 고정한다.
+
+### API 주소 결정
+
+- `NEXT_PUBLIC_API_BASE_URL`이 있으면 그 값을 쓴다.
+- 없으면 브라우저가 접속한 현재 호스트에 `:8000`을 붙여 API 주소를 만든다.
+
+이 규칙은 LAN IP로 접속하는 ODROID 배포에서 프론트가 잘못 `localhost:8000`을 바라보지 않게 하기 위한 것이다.
+
+## 9. 배포 자산
+
+이미 만들어둔 주요 배포 자산:
+
+- [docker-compose.odroid.yml](</C:/Users/digit/OneDrive/문서/New project/docker-compose.odroid.yml>)
+- [.env.odroid](</C:/Users/digit/OneDrive/문서/New project/.env.odroid>)
+- [scripts/deploy-odroid.ps1](</C:/Users/digit/OneDrive/문서/New project/scripts/deploy-odroid.ps1>)
+- [scripts/odroid-status.ps1](</C:/Users/digit/OneDrive/문서/New project/scripts/odroid-status.ps1>)
+- [deploy/odroid/remote-deploy.sh](</C:/Users/digit/OneDrive/문서/New project/deploy/odroid/remote-deploy.sh>)
+- [deploy/odroid/bootstrap-docker.sh](</C:/Users/digit/OneDrive/문서/New project/deploy/odroid/bootstrap-docker.sh>)
+
+배포 대상 기본값:
+
+- IP: `192.168.1.204`
+- 사용자: `digitie`
+- 앱 경로: `/home/digitie/apps/parking-radar`
+
+비밀번호는 저장하지 않는 것이 원칙이다.
+
+관련 문서:
+- [deployment.md](</C:/Users/digit/OneDrive/문서/New project/docs/deployment.md>)
+- [deploy/odroid/README.md](</C:/Users/digit/OneDrive/문서/New project/deploy/odroid/README.md>)
+
+## 10. 테스트 기준
+
+현재 기준으로 반드시 유지해야 하는 검증 축:
+
+- 백엔드 pytest
+- 프론트 Vitest
+- Docker 컨테이너 내부 실행
+- 반응형 렌더링 확인
+- 시계열 툴팁 확인
+- 수동 수집 성공 / 쿨다운 제한 확인
+- `collector-status` 기반 모드 확인
+
+마지막 확인 기준:
+
+- 백엔드: `26 passed`
+- 프론트: `18 passed`
+
+관련 문서:
+- [testing.md](</C:/Users/digit/OneDrive/문서/New project/docs/testing.md>)
+
+## 11. 운영 중 자주 헷갈리는 점
+
+- `client_mode=sample`이면 실데이터가 아니다.
+- `scheduler_enabled=false`면 자동 수집은 안 돈다.
+- `snapshot_count=0`은 실패가 아닐 수 있다.
+- `데이터 기준 시각`과 `수집기 마지막 동기화`는 서로 달라도 정상일 수 있다.
+- 프론트 이미지를 다시 빌드했으면 컨테이너 재생성까지 해야 화면이 바뀐다.
+- SQLite 런타임 파일을 OneDrive bind mount에 직접 두면 간헐 오류가 날 수 있다.
+
+관련 문서:
+- [troubleshooting.md](</C:/Users/digit/OneDrive/문서/New project/docs/troubleshooting.md>)
+
+## 12. 다음 변경 시 같이 갱신해야 하는 문서
+
+아래 중 하나가 바뀌면 이 문서도 같이 업데이트하는 것을 권장한다.
+
+- 기본 수집원 결정
+- live / sample 기본 실행 정책
+- 세부 주차장 정규화 기준
+- 시각 표시 규칙
+- 수동 수집 제약
+- 배포 스크립트와 배포 경로
+- 검증 기준과 테스트 결과
+
+## 13. WSL 테스트 기준
+
+- 모든 테스트 기준 환경은 `WSL2 + Docker`이다.
+- 로컬 테스트 결과를 문서에 남길 때도 `WSL2`에서 실행한 컨테이너 테스트 결과를 기준으로 적는다.
+- Windows PowerShell은 배포와 원격 상태 확인 보조 환경으로 취급한다.
+## 14. Live Seed Policy
+
+- ODROID live 운영에서는 `client_mode=live`, `SEED_SAMPLE_DATA=false`를 기본값으로 사용한다.
+- 샘플 시계열은 `client_mode=sample` 개발 모드에서만 시드한다.
+- live 환경 DB에서 `collection_run_id is null` row는 샘플 스냅샷 가능성이 높으므로, 시계열이 이상하게 길어지면 먼저 이 조건을 확인한다.
+- `15056803` 카탈로그에는 개발계정 `5,000` 트래픽이 보이지만, `2026-04-28` 실측에서는 100회 성공 후 101번째부터 `LIMITED NUMBER OF SERVICE REQUESTS EXCEEDS ERROR.`가 발생했다.
+- 그래서 현재 ODROID live 프로파일은 5분이나 10분이 아니라 20분 주기와 20분 수동 수집 제한을 사용한다.

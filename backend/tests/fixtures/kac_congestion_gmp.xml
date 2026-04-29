@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<response>
+  <body>
+    <items>
+      <item>
+        <airportEng>Gimpo</airportEng>
+        <airportKor>김포국제공항</airportKor>
+        <parkingAirportCodeName>국내선 제1주차장</parkingAirportCodeName>
+        <parkingCongestion>혼잡</parkingCongestion>
+        <parkingCongestionDegree>94.1</parkingCongestionDegree>
+        <parkingOccupiedSpace>482</parkingOccupiedSpace>
+        <parkingTotalSpace>510</parkingTotalSpace>
+        <sysGetdate>20260425</sysGetdate>
+        <sysGettime>092000</sysGettime>
+      </item>
+      <item>
+        <airportEng>Gimpo</airportEng>
+        <airportKor>김포국제공항</airportKor>
+        <parkingAirportCodeName>국제선 지하주차장</parkingAirportCodeName>
+        <parkingCongestion>원활</parkingCongestion>
+        <parkingCongestionDegree>61.0</parkingCongestionDegree>
+        <parkingOccupiedSpace>128</parkingOccupiedSpace>
+        <parkingTotalSpace>210</parkingTotalSpace>
+        <sysGetdate>20260425</sysGetdate>
+        <sysGettime>092000</sysGettime>
+      </item>
+    </items>
+  </body>
+</response>
+

@@ -1,0 +1,44 @@
+from __future__ import annotations
+
+from functools import lru_cache
+
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
+
+    app_name: str = "parking-radar"
+    database_url: str = "sqlite+aiosqlite:///./data/app.sqlite3"
+    app_timezone: str = "Asia/Seoul"
+    enable_scheduler: bool = False
+    seed_sample_data: bool = True
+    collect_interval_seconds: int = 300
+    manual_collect_min_interval_seconds: int = 300
+    api_timeout_seconds: int = 15
+    data_go_kr_service_key: str | None = None
+    enable_incheon_collection: bool = False
+    enable_fee_collection: bool = False
+    airport_codes_csv: str = "GMP,PUS,CJU"
+    cors_origins_csv: str = "http://localhost:3000"
+    api_prefix: str = ""
+    use_sample_client_when_no_key: bool = True
+
+    @property
+    def supported_airport_codes(self) -> list[str]:
+        return [code.strip().upper() for code in self.airport_codes_csv.split(",") if code.strip()]
+
+    @property
+    def cors_origins(self) -> list[str]:
+        return [origin.strip() for origin in self.cors_origins_csv.split(",") if origin.strip()]
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()

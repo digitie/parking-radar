@@ -1,0 +1,27 @@
+{
+  "response": {
+    "header": {
+      "resultCode": "00",
+      "resultMsg": "NORMAL SERVICE"
+    },
+    "body": {
+      "items": {
+        "item": [
+          {
+            "floor": "T1 단기주차장",
+            "parking": "575",
+            "parkingarea": "640",
+            "datetm": "2026-04-25 09:20"
+          },
+          {
+            "floor": "T2 장기주차장",
+            "parking": "832",
+            "parkingarea": "910",
+            "datetm": "2026-04-25 09:20"
+          }
+        ]
+      }
+    }
+  }
+}
+

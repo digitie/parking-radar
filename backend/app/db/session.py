@@ -1,0 +1,45 @@
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from pathlib import Path
+
+from sqlalchemy import event, text
+from sqlalchemy.engine import make_url
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
+
+from app.models import Base
+
+
+def create_engine_and_session_factory(database_url: str) -> tuple[AsyncEngine, async_sessionmaker[AsyncSession]]:
+    if database_url.startswith("sqlite"):
+        sqlite_url = make_url(database_url)
+        database_path = sqlite_url.database
+        if database_path and database_path != ":memory:":
+            Path(database_path).parent.mkdir(parents=True, exist_ok=True)
+
+    engine = create_async_engine(database_url, future=True)
+
+    if database_url.startswith("sqlite"):
+        @event.listens_for(engine.sync_engine, "connect")
+        def set_sqlite_pragma(dbapi_connection, _connection_record) -> None:
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.execute("PRAGMA busy_timeout=5000")
+            cursor.execute("PRAGMA synchronous=NORMAL")
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.close()
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    return engine, session_factory
+
+
+async def init_database(engine: AsyncEngine) -> None:
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+
+
+async def session_scope(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> AsyncIterator[AsyncSession]:
+    async with session_factory() as session:
+        yield session

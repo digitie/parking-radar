@@ -1,0 +1,152 @@
+import { buildApiClient } from "@/lib/api";
+
+describe("api client", () => {
+  test("requests the airports endpoint", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => [{ code: "GMP", name_ko: "김포국제공항", name_en: "Gimpo", source: "kac", parking_lots: [] }],
+    });
+
+    vi.stubGlobal("fetch", fetchMock);
+    const client = buildApiClient("http://localhost:8000");
+    await client.getAirports();
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost:8000/airports",
+      expect.objectContaining({ cache: "no-store" })
+    );
+  });
+
+  test("uses the current browser host when the API base URL is not explicitly passed", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ generated_at: "2026-04-26T00:00:00.000Z", items: [] }),
+    });
+
+    vi.stubGlobal("fetch", fetchMock);
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      value: new URL("http://192.168.1.204:3000/"),
+    });
+
+    const client = buildApiClient();
+    await client.getCurrent("GMP");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://192.168.1.204:8000/parking/current?airport_code=GMP",
+      expect.objectContaining({ cache: "no-store" })
+    );
+  });
+
+  test("requests lot-specific analytics endpoints when a parking lot is selected", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => [],
+    });
+
+    vi.stubGlobal("fetch", fetchMock);
+    const client = buildApiClient("http://localhost:8000");
+    await client.getByHour("GMP", 12);
+    await client.getByWeekday("GMP", 12);
+    await client.getByWeekdayHour("GMP", 12);
+    await client.getThresholdEvents("GMP", 12);
+    await client.getThresholdInsights("GMP", { parkingLotId: 12, days: 21, intervalMinutes: 10 });
+    await client.getTimeSeries("GMP", { parkingLotId: 12, days: 7, intervalMinutes: 30 });
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "http://localhost:8000/parking/analytics/by-hour?airport_code=GMP&parking_lot_id=12",
+      expect.objectContaining({ cache: "no-store" })
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "http://localhost:8000/parking/analytics/by-weekday?airport_code=GMP&parking_lot_id=12",
+      expect.objectContaining({ cache: "no-store" })
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      3,
+      "http://localhost:8000/parking/analytics/by-weekday-hour?airport_code=GMP&parking_lot_id=12",
+      expect.objectContaining({ cache: "no-store" })
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      4,
+      "http://localhost:8000/parking/analytics/threshold-events?airport_code=GMP&parking_lot_id=12",
+      expect.objectContaining({ cache: "no-store" })
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      5,
+      "http://localhost:8000/parking/analytics/threshold-insights?airport_code=GMP&parking_lot_id=12&days=21&interval_minutes=10",
+      expect.objectContaining({ cache: "no-store" })
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      6,
+      "http://localhost:8000/parking/analytics/timeseries?airport_code=GMP&parking_lot_id=12&days=7&interval_minutes=30",
+      expect.objectContaining({ cache: "no-store" })
+    );
+  });
+
+  test("surfaces backend detail messages for collector cooldown errors", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 409,
+      json: async () => ({ detail: "마지막 업데이트 후 5분이 지나지 않았습니다." }),
+    });
+
+    vi.stubGlobal("fetch", fetchMock);
+    const client = buildApiClient("http://localhost:8000");
+
+    await expect(client.runCollector()).rejects.toThrow("마지막 업데이트 후 5분이 지나지 않았습니다.");
+  });
+
+  test("requests collector status and manual collection endpoints", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          scheduler_enabled: true,
+          collect_interval_seconds: 300,
+          manual_collect_min_interval_seconds: 300,
+          client_mode: "live",
+          enabled_sources: ["kac_parking"],
+          data_go_kr_service_key_configured: true,
+          supported_airport_codes: ["GMP", "PUS", "CJU"],
+          latest_snapshot_observed_at: "2026-04-25T00:20:00.000Z",
+          latest_snapshot_collected_at: "2026-04-25T00:30:00.000Z",
+          manual_collect_available_at: "2026-04-25T00:35:00.000Z",
+          manual_collect_blocked: false,
+          last_run: null,
+          recent_runs: [],
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          collection_run_id: 1,
+          status: "success",
+          client_mode: "live",
+          raw_response_count: 1,
+          snapshot_count: 3,
+          fee_rule_count: 0,
+          errors: [],
+        }),
+      });
+
+    vi.stubGlobal("fetch", fetchMock);
+    const client = buildApiClient("http://localhost:8000");
+
+    await client.getCollectorStatus();
+    await client.runCollector();
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "http://localhost:8000/admin/collector-status",
+      expect.objectContaining({ cache: "no-store" })
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "http://localhost:8000/admin/collect",
+      expect.objectContaining({ method: "POST", cache: "no-store" })
+    );
+  });
+});

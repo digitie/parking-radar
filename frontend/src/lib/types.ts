@@ -1,0 +1,193 @@
+export type ParkingLot = {
+  id: number;
+  name: string;
+  terminal: string | null;
+  category: string | null;
+  is_active: boolean;
+};
+
+export type Airport = {
+  code: string;
+  name_ko: string;
+  name_en: string | null;
+  source: string;
+  parking_lots: ParkingLot[];
+};
+
+export type ParkingStatus = {
+  airport_code: string;
+  airport_name: string;
+  parking_lot_id: number;
+  parking_lot_name: string;
+  terminal: string | null;
+  category: string | null;
+  observed_at: string;
+  collected_at: string;
+  occupied_spaces: number;
+  total_spaces: number;
+  available_spaces: number;
+  congestion_label: string | null;
+  congestion_ratio: number | null;
+  status_level: "full" | "critical" | "warning" | "busy" | "stable";
+};
+
+export type ParkingCurrentResponse = {
+  generated_at: string;
+  items: ParkingStatus[];
+};
+
+export type CollectionSummary = {
+  collection_run_id: number;
+  status: string;
+  client_mode: string;
+  raw_response_count: number;
+  snapshot_count: number;
+  fee_rule_count: number;
+  errors: string[];
+};
+
+export type CollectionRunStatus = {
+  id: number;
+  started_at: string;
+  finished_at: string | null;
+  status: string;
+  trigger: string;
+  error_message: string | null;
+  raw_response_count: number;
+  snapshot_count: number;
+};
+
+export type CollectorStatusResponse = {
+  scheduler_enabled: boolean;
+  collect_interval_seconds: number;
+  manual_collect_min_interval_seconds: number;
+  client_mode: string;
+  enabled_sources: string[];
+  data_go_kr_service_key_configured: boolean;
+  supported_airport_codes: string[];
+  latest_snapshot_observed_at: string | null;
+  latest_snapshot_collected_at: string | null;
+  manual_collect_available_at: string | null;
+  manual_collect_blocked: boolean;
+   upstream_rate_limited: boolean;
+   upstream_rate_limited_until: string | null;
+  last_run: CollectionRunStatus | null;
+  recent_runs: CollectionRunStatus[];
+};
+
+export type TimeSeriesPoint = {
+  bucket_at: string;
+  available_spaces: number;
+  occupied_spaces: number;
+  total_spaces: number;
+  lot_observations: number;
+};
+
+export type ParkingTimeSeriesResponse = {
+  generated_at: string;
+  airport_code: string | null;
+  parking_lot_id: number | null;
+  days: number;
+  interval_minutes: number;
+  items: TimeSeriesPoint[];
+};
+
+export type HourlyBucket = {
+  hour: number;
+  average_available_spaces: number;
+  min_available_spaces: number;
+  max_available_spaces: number;
+  observations: number;
+};
+
+export type WeekdayBucket = {
+  weekday: number;
+  weekday_name: string;
+  average_available_spaces: number;
+  min_available_spaces: number;
+  max_available_spaces: number;
+  observations: number;
+};
+
+export type WeekdayHourBucket = {
+  hour: number;
+  average_available_spaces: number | null;
+  min_available_spaces: number | null;
+  max_available_spaces: number | null;
+  observations: number;
+};
+
+export type WeekdayHourlyPattern = {
+  weekday: number;
+  weekday_name: string;
+  average_available_spaces: number | null;
+  min_available_spaces: number | null;
+  max_available_spaces: number | null;
+  observations: number;
+  hourly_buckets: WeekdayHourBucket[];
+};
+
+export type ThresholdEvent = {
+  parking_lot_id: number;
+  parking_lot_name: string;
+  airport_code: string;
+  airport_name: string;
+  threshold: number;
+  direction: "down" | "up";
+  crossed_at: string;
+  previous_available_spaces: number;
+  current_available_spaces: number;
+};
+
+export type ThresholdWeekdayTime = {
+  threshold: number;
+  weekday: number;
+  weekday_name: string;
+  typical_minutes_of_day: number | null;
+  sample_count: number;
+};
+
+export type ThresholdDateHistoryItem = {
+  threshold: number;
+  local_date: string;
+  weekday: number;
+  weekday_name: string;
+  crossed_at: string;
+  minutes_of_day: number;
+  available_spaces: number;
+};
+
+export type ThresholdInsightsResponse = {
+  generated_at: string;
+  airport_code: string | null;
+  parking_lot_id: number | null;
+  days: number;
+  interval_minutes: number;
+  weekday_items: ThresholdWeekdayTime[];
+  history_items: ThresholdDateHistoryItem[];
+};
+
+export type FeeCalculationRequest = {
+  airport_code: string;
+  parking_lot_id?: number | null;
+  vehicle_size: "small" | "large";
+  entry_at: string;
+  exit_at: string;
+};
+
+export type FeeBreakdown = {
+  date: string;
+  day_type: string;
+  duration_minutes: number;
+  applied_fee: number;
+};
+
+export type FeeCalculationResponse = {
+  supported: boolean;
+  airport_code: string;
+  vehicle_size: string;
+  total_fee: number | null;
+  currency: string;
+  message: string | null;
+  breakdown: FeeBreakdown[];
+};

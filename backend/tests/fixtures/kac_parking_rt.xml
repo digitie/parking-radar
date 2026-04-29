@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<response>
+  <header>
+    <resultCode>00</resultCode>
+    <resultMsg>NORMAL SERVICE.</resultMsg>
+  </header>
+  <body>
+    <items>
+      <item>
+        <aprEng>GIMPO INTERNATIONAL AIRPORT</aprEng>
+        <aprKor>김포국제공항</aprKor>
+        <parkingAirportCodeName>국제선 지하</parkingAirportCodeName>
+        <parkingFullSpace>599</parkingFullSpace>
+        <parkingGetdate>2026-04-25</parkingGetdate>
+        <parkingGettime>09:20:03</parkingGettime>
+        <parkingIincnt>318</parkingIincnt>
+        <parkingIoutcnt>295</parkingIoutcnt>
+        <parkingIstay>485</parkingIstay>
+      </item>
+      <item>
+        <aprEng>GIMHAE INTERNATIONAL AIRPORT</aprEng>
+        <aprKor>김해국제공항</aprKor>
+        <parkingAirportCodeName>P3 여객(화물)</parkingAirportCodeName>
+        <parkingFullSpace>878</parkingFullSpace>
+        <parkingGetdate>2026-04-25</parkingGetdate>
+        <parkingGettime>09:20:03</parkingGettime>
+        <parkingIincnt>342</parkingIincnt>
+        <parkingIoutcnt>349</parkingIoutcnt>
+        <parkingIstay>809</parkingIstay>
+      </item>
+      <item>
+        <aprEng>JEJU INTERNATIONAL AIRPORT</aprEng>
+        <aprKor>제주국제공항</aprKor>
+        <parkingAirportCodeName>P1주차장</parkingAirportCodeName>
+        <parkingFullSpace>1763</parkingFullSpace>
+        <parkingGetdate>2026-04-25</parkingGetdate>
+        <parkingGettime>09:20:03</parkingGettime>
+        <parkingIincnt>3573</parkingIincnt>
+        <parkingIoutcnt>3333</parkingIoutcnt>
+        <parkingIstay>1417</parkingIstay>
+      </item>
+    </items>
+  </body>
+</response>

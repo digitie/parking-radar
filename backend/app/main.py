@@ -1,0 +1,575 @@
+from __future__ import annotations
+
+import asyncio
+import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from contextlib import suppress
+from datetime import timedelta
+
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from app.core.config import Settings, get_settings
+from app.core.time_utils import now_utc, serialize_utc, to_seoul
+from app.db.session import create_engine_and_session_factory, init_database
+from app.models import Airport, CollectionRun, ParkingFeeRule, ParkingLot, ParkingSnapshot, RawApiResponse
+from app.schemas import (
+    AirportSummary,
+    CollectionSummary,
+    CollectionRunStatus,
+    CollectorStatusResponse,
+    FeeCalculationRequest,
+    FeeCalculationResponse,
+    HealthResponse,
+    HourlyBucket,
+    ParkingCurrentResponse,
+    ParkingHistoryResponse,
+    ParkingLotSummary,
+    ParkingStatus,
+    ParkingTimeSeriesResponse,
+    ThresholdEvent,
+    ThresholdInsightsResponse,
+    ThresholdDateHistoryItem,
+    ThresholdWeekdayTime,
+    TimeSeriesPoint,
+    WeekdayBucket,
+    WeekdayHourlyPattern,
+)
+from app.services.analytics import (
+    build_threshold_insights,
+    build_hourly_buckets,
+    build_time_series,
+    build_weekday_buckets,
+    build_weekday_hour_patterns,
+    classify_status_level,
+    detect_threshold_events,
+)
+from app.services.collection import CollectionService
+from app.services.fee_calculator import calculate_total_fee
+from app.services.sample_data import seed_sample_database
+
+logger = logging.getLogger(__name__)
+
+
+def create_app(settings: Settings | None = None) -> FastAPI:
+    resolved_settings = settings or get_settings()
+    engine, session_factory = create_engine_and_session_factory(resolved_settings.database_url)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        await init_database(engine)
+        app.state.engine = engine
+        app.state.session_factory = session_factory
+        app.state.settings = resolved_settings
+        app.state.collection_service = CollectionService(resolved_settings)
+        app.state.scheduler_task = None
+
+        if resolved_settings.seed_sample_data and app.state.collection_service.client_mode == "sample":
+            async with session_factory() as session:
+                await seed_sample_database(session)
+        elif resolved_settings.seed_sample_data:
+            logger.info("sample seeding skipped because client_mode=%s", app.state.collection_service.client_mode)
+
+        if resolved_settings.enable_scheduler:
+            logger.info(
+                "scheduler enabled interval_seconds=%s client_mode=%s sources=%s airports=%s",
+                resolved_settings.collect_interval_seconds,
+                app.state.collection_service.client_mode,
+                ",".join(app.state.collection_service.enabled_sources),
+                ",".join(resolved_settings.supported_airport_codes),
+            )
+            app.state.scheduler_task = asyncio.create_task(_run_scheduler(app))
+
+        try:
+            yield
+        finally:
+            scheduler_task = app.state.scheduler_task
+            if scheduler_task is not None:
+                scheduler_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await scheduler_task
+            await engine.dispose()
+
+    app = FastAPI(title=resolved_settings.app_name, lifespan=lifespan)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=resolved_settings.cors_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    def get_session_factory(request: Request) -> async_sessionmaker[AsyncSession]:
+        return request.app.state.session_factory
+
+    async def get_db(
+        session_factory: async_sessionmaker[AsyncSession] = Depends(get_session_factory),
+    ) -> AsyncIterator[AsyncSession]:
+        async with session_factory() as session:
+            yield session
+
+    def get_collection_service(request: Request) -> CollectionService:
+        return request.app.state.collection_service
+
+    @app.get("/health", response_model=HealthResponse)
+    async def health(session: AsyncSession = Depends(get_db)) -> HealthResponse:
+        seeded = await session.scalar(select(func.count(ParkingSnapshot.id)))
+        return HealthResponse(status="ok", database="ready", seeded=bool(seeded))
+
+    @app.get("/airports", response_model=list[AirportSummary])
+    async def airports(session: AsyncSession = Depends(get_db)) -> list[AirportSummary]:
+        result = await session.execute(select(Airport).order_by(Airport.code))
+        airports = result.scalars().all()
+        payload: list[AirportSummary] = []
+        for airport in airports:
+            lots = await session.execute(
+                select(ParkingLot).where(ParkingLot.airport_id == airport.id).order_by(ParkingLot.name)
+            )
+            payload.append(
+                AirportSummary(
+                    code=airport.code,
+                    name_ko=airport.name_ko,
+                    name_en=airport.name_en,
+                    source=airport.source,
+                    parking_lots=[
+                        ParkingLotSummary(
+                            id=lot.id,
+                            name=lot.name,
+                            terminal=lot.terminal,
+                            category=lot.category,
+                            is_active=lot.is_active,
+                        )
+                        for lot in lots.scalars().all()
+                    ],
+                )
+            )
+        return payload
+
+    @app.get("/parking/current", response_model=ParkingCurrentResponse)
+    async def parking_current(
+        airport_code: str | None = Query(default=None),
+        session: AsyncSession = Depends(get_db),
+    ) -> ParkingCurrentResponse:
+        query = (
+            select(ParkingSnapshot, ParkingLot, Airport)
+            .join(ParkingLot, ParkingLot.id == ParkingSnapshot.parking_lot_id)
+            .join(Airport, Airport.id == ParkingSnapshot.airport_id)
+            .order_by(ParkingLot.id, ParkingSnapshot.observed_at.desc())
+        )
+        if airport_code:
+            query = query.where(Airport.code == airport_code.upper())
+
+        rows = (await session.execute(query)).all()
+        latest_by_lot: dict[int, tuple[ParkingSnapshot, ParkingLot, Airport]] = {}
+        for snapshot, lot, airport in rows:
+            latest_by_lot.setdefault(lot.id, (snapshot, lot, airport))
+
+        items = [
+            ParkingStatus(
+                airport_code=airport.code,
+                airport_name=airport.name_ko,
+                parking_lot_id=lot.id,
+                parking_lot_name=lot.name,
+                terminal=lot.terminal,
+                category=lot.category,
+                observed_at=serialize_utc(snapshot.observed_at),
+                collected_at=serialize_utc(snapshot.collected_at),
+                occupied_spaces=snapshot.occupied_spaces,
+                total_spaces=snapshot.total_spaces,
+                available_spaces=snapshot.available_spaces,
+                congestion_label=snapshot.congestion_label,
+                congestion_ratio=snapshot.congestion_ratio,
+                status_level=classify_status_level(snapshot.available_spaces, snapshot.total_spaces),
+            )
+            for snapshot, lot, airport in latest_by_lot.values()
+        ]
+        items.sort(key=lambda item: (item.airport_code, item.available_spaces))
+        return ParkingCurrentResponse(generated_at=now_utc(), items=items)
+
+    @app.get("/parking/history", response_model=ParkingHistoryResponse)
+    async def parking_history(
+        airport_code: str | None = Query(default=None),
+        parking_lot_id: int | None = Query(default=None),
+        days: int = Query(default=3, ge=1, le=30),
+        session: AsyncSession = Depends(get_db),
+    ) -> ParkingHistoryResponse:
+        cutoff = now_utc() - timedelta(days=days)
+        query = select(ParkingSnapshot).where(ParkingSnapshot.observed_at >= cutoff).order_by(ParkingSnapshot.observed_at)
+
+        if parking_lot_id:
+            query = query.where(ParkingSnapshot.parking_lot_id == parking_lot_id)
+        elif airport_code:
+            airport = await session.scalar(select(Airport).where(Airport.code == airport_code.upper()))
+            if airport is None:
+                return ParkingHistoryResponse(items=[])
+            query = query.where(ParkingSnapshot.airport_id == airport.id)
+
+        snapshots = (await session.execute(query)).scalars().all()
+        return ParkingHistoryResponse(
+            items=[
+                {
+                    "observed_at": serialize_utc(snapshot.observed_at),
+                    "occupied_spaces": snapshot.occupied_spaces,
+                    "total_spaces": snapshot.total_spaces,
+                    "available_spaces": snapshot.available_spaces,
+                }
+                for snapshot in snapshots
+            ]
+        )
+
+    @app.get("/parking/analytics/by-hour", response_model=list[HourlyBucket])
+    async def parking_by_hour(
+        airport_code: str | None = Query(default=None),
+        parking_lot_id: int | None = Query(default=None),
+        days: int = Query(default=14, ge=1, le=60),
+        session: AsyncSession = Depends(get_db),
+    ) -> list[HourlyBucket]:
+        snapshots = await _load_snapshots(session, airport_code, parking_lot_id, days)
+        return [HourlyBucket(**bucket) for bucket in build_hourly_buckets(snapshots)]
+
+    @app.get("/parking/analytics/by-weekday", response_model=list[WeekdayBucket])
+    async def parking_by_weekday(
+        airport_code: str | None = Query(default=None),
+        parking_lot_id: int | None = Query(default=None),
+        days: int = Query(default=14, ge=1, le=60),
+        session: AsyncSession = Depends(get_db),
+    ) -> list[WeekdayBucket]:
+        snapshots = await _load_snapshots(session, airport_code, parking_lot_id, days)
+        return [WeekdayBucket(**bucket) for bucket in build_weekday_buckets(snapshots)]
+
+    @app.get("/parking/analytics/by-weekday-hour", response_model=list[WeekdayHourlyPattern])
+    async def parking_by_weekday_hour(
+        airport_code: str | None = Query(default=None),
+        parking_lot_id: int | None = Query(default=None),
+        days: int = Query(default=14, ge=1, le=60),
+        session: AsyncSession = Depends(get_db),
+    ) -> list[WeekdayHourlyPattern]:
+        snapshots = await _load_snapshots(session, airport_code, parking_lot_id, days)
+        return [WeekdayHourlyPattern(**pattern) for pattern in build_weekday_hour_patterns(snapshots)]
+
+    @app.get("/parking/analytics/timeseries", response_model=ParkingTimeSeriesResponse)
+    async def parking_time_series(
+        airport_code: str | None = Query(default=None),
+        parking_lot_id: int | None = Query(default=None),
+        days: int = Query(default=7, ge=1, le=30),
+        interval_minutes: int = Query(default=30, ge=10, le=60),
+        session: AsyncSession = Depends(get_db),
+    ) -> ParkingTimeSeriesResponse:
+        snapshots = await _load_snapshots(
+            session,
+            airport_code,
+            parking_lot_id,
+            days,
+            buffer_minutes=interval_minutes,
+        )
+        return ParkingTimeSeriesResponse(
+            generated_at=now_utc(),
+            airport_code=airport_code.upper() if airport_code else None,
+            parking_lot_id=parking_lot_id,
+            days=days,
+            interval_minutes=interval_minutes,
+            items=[TimeSeriesPoint(**point) for point in build_time_series(snapshots, days=days, interval_minutes=interval_minutes)],
+        )
+
+    @app.get("/parking/analytics/threshold-events", response_model=list[ThresholdEvent])
+    async def threshold_events(
+        airport_code: str | None = Query(default=None),
+        parking_lot_id: int | None = Query(default=None),
+        days: int = Query(default=14, ge=1, le=60),
+        limit: int = Query(default=20, ge=1, le=100),
+        session: AsyncSession = Depends(get_db),
+    ) -> list[ThresholdEvent]:
+        rows = await _load_snapshot_rows(session, airport_code, parking_lot_id, days)
+        return [
+            ThresholdEvent(**{**event, "crossed_at": serialize_utc(event["crossed_at"])})
+            for event in detect_threshold_events(rows, limit=limit)
+        ]
+
+    @app.get("/parking/analytics/threshold-insights", response_model=ThresholdInsightsResponse)
+    async def threshold_insights(
+        airport_code: str | None = Query(default=None),
+        parking_lot_id: int | None = Query(default=None),
+        days: int = Query(default=21, ge=3, le=90),
+        interval_minutes: int = Query(default=10, ge=10, le=60),
+        session: AsyncSession = Depends(get_db),
+    ) -> ThresholdInsightsResponse:
+        snapshots = await _load_snapshots(
+            session,
+            airport_code,
+            parking_lot_id,
+            days,
+            buffer_minutes=interval_minutes,
+        )
+        points = build_time_series(
+            snapshots,
+            days=days,
+            interval_minutes=interval_minutes,
+            tz_name=resolved_settings.app_timezone,
+        )
+        insights = build_threshold_insights(
+            points,
+            tz_name=resolved_settings.app_timezone,
+        )
+        return ThresholdInsightsResponse(
+            generated_at=now_utc(),
+            airport_code=airport_code.upper() if airport_code else None,
+            parking_lot_id=parking_lot_id,
+            days=days,
+            interval_minutes=interval_minutes,
+            weekday_items=[ThresholdWeekdayTime(**item) for item in insights["weekday_items"]],
+            history_items=[
+                ThresholdDateHistoryItem(
+                    **{**item, "crossed_at": serialize_utc(item["crossed_at"])}
+                )
+                for item in insights["history_items"]
+            ],
+        )
+
+    @app.post("/fees/calculate", response_model=FeeCalculationResponse)
+    async def calculate_fees(
+        payload: FeeCalculationRequest,
+        session: AsyncSession = Depends(get_db),
+    ) -> FeeCalculationResponse:
+        airport = await session.scalar(select(Airport).where(Airport.code == payload.airport_code.upper()))
+        if airport is None:
+            raise HTTPException(status_code=404, detail="지원하지 않는 공항입니다.")
+
+        if airport.code == "ICN":
+            return FeeCalculationResponse(
+                supported=False,
+                airport_code=airport.code,
+                vehicle_size=payload.vehicle_size,
+                message="인천공항은 현재 요금 계산을 지원하지 않습니다.",
+            )
+
+        query = select(ParkingFeeRule).where(
+            ParkingFeeRule.airport_id == airport.id,
+            ParkingFeeRule.vehicle_size == payload.vehicle_size,
+        )
+        if payload.parking_lot_id is not None:
+            query = query.where(
+                (ParkingFeeRule.parking_lot_id == payload.parking_lot_id) | (ParkingFeeRule.parking_lot_id.is_(None))
+            )
+
+        rules = (await session.execute(query)).scalars().all()
+        if not rules:
+            return FeeCalculationResponse(
+                supported=False,
+                airport_code=airport.code,
+                vehicle_size=payload.vehicle_size,
+                message="요금 규칙을 찾지 못했습니다.",
+            )
+
+        calculated = calculate_total_fee(payload.entry_at, payload.exit_at, rules)
+        return FeeCalculationResponse(
+            supported=True,
+            airport_code=airport.code,
+            vehicle_size=payload.vehicle_size,
+            total_fee=calculated.total_fee,
+            breakdown=calculated.breakdown,
+        )
+
+    @app.post("/admin/collect", response_model=CollectionSummary)
+    async def admin_collect(
+        session: AsyncSession = Depends(get_db),
+        service: CollectionService = Depends(get_collection_service),
+    ) -> CollectionSummary:
+        rate_limit_state = await service.get_upstream_rate_limit_state(session)
+        if rate_limit_state.is_blocked and rate_limit_state.blocked_until is not None:
+            blocked_until_kst = to_seoul(rate_limit_state.blocked_until).strftime("%Y-%m-%d %H:%M:%S KST")
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    "공공데이터 API 요청 한도에 도달해 현재 수집을 잠시 멈췄습니다. "
+                    f"{blocked_until_kst} 이후에 다시 시도해 주세요."
+                ),
+            )
+
+        latest_snapshot = await _load_latest_snapshot_metadata(session)
+        latest_collected_at = latest_snapshot["collected_at"]
+        cooldown = timedelta(seconds=resolved_settings.manual_collect_min_interval_seconds)
+        if latest_collected_at is not None:
+            normalized_collected_at = serialize_utc(latest_collected_at)
+            available_at = normalized_collected_at + cooldown
+            if now_utc() < available_at:
+                latest_collected_at_kst = to_seoul(normalized_collected_at).strftime("%Y-%m-%d %H:%M:%S KST")
+                available_at_kst = to_seoul(available_at).strftime("%Y-%m-%d %H:%M:%S KST")
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"마지막 업데이트 시각이 {latest_collected_at_kst} 입니다. "
+                        f"{resolved_settings.manual_collect_min_interval_seconds // 60}분이 지나지 않아 "
+                        f"{available_at_kst} 이후에 다시 실행할 수 있습니다."
+                    ),
+                )
+        summary = await service.collect(session, trigger="manual")
+        return CollectionSummary(**summary)
+
+    @app.get("/admin/collector-status", response_model=CollectorStatusResponse)
+    async def admin_collector_status(
+        session: AsyncSession = Depends(get_db),
+        service: CollectionService = Depends(get_collection_service),
+    ) -> CollectorStatusResponse:
+        recent_runs = await _load_collection_run_statuses(session, limit=5)
+        last_run = recent_runs[0] if recent_runs else None
+        latest_snapshot = await _load_latest_snapshot_metadata(session)
+        latest_observed_at = latest_snapshot["observed_at"]
+        latest_collected_at = latest_snapshot["collected_at"]
+        manual_collect_available_at = None
+        manual_collect_blocked = False
+        rate_limit_state = await service.get_upstream_rate_limit_state(session)
+
+        if latest_collected_at is not None:
+            manual_collect_available_at = serialize_utc(latest_collected_at) + timedelta(
+                seconds=resolved_settings.manual_collect_min_interval_seconds
+            )
+            manual_collect_blocked = now_utc() < manual_collect_available_at
+
+        return CollectorStatusResponse(
+            scheduler_enabled=resolved_settings.enable_scheduler,
+            collect_interval_seconds=resolved_settings.collect_interval_seconds,
+            manual_collect_min_interval_seconds=resolved_settings.manual_collect_min_interval_seconds,
+            client_mode=service.client_mode,
+            enabled_sources=service.enabled_sources,
+            data_go_kr_service_key_configured=bool(resolved_settings.data_go_kr_service_key),
+            supported_airport_codes=resolved_settings.supported_airport_codes,
+            latest_snapshot_observed_at=serialize_utc(latest_observed_at) if latest_observed_at else None,
+            latest_snapshot_collected_at=serialize_utc(latest_collected_at) if latest_collected_at else None,
+            manual_collect_available_at=manual_collect_available_at,
+            manual_collect_blocked=manual_collect_blocked,
+            upstream_rate_limited=rate_limit_state.is_blocked,
+            upstream_rate_limited_until=(
+                serialize_utc(rate_limit_state.blocked_until) if rate_limit_state.blocked_until else None
+            ),
+            last_run=last_run,
+            recent_runs=recent_runs,
+        )
+
+    async def _load_snapshots(
+        session: AsyncSession,
+        airport_code: str | None,
+        parking_lot_id: int | None,
+        days: int,
+        buffer_minutes: int = 0,
+    ) -> list[ParkingSnapshot]:
+        cutoff = now_utc() - timedelta(days=days, minutes=buffer_minutes)
+        query = select(ParkingSnapshot).where(ParkingSnapshot.observed_at >= cutoff)
+
+        if parking_lot_id:
+            query = query.where(ParkingSnapshot.parking_lot_id == parking_lot_id)
+        elif airport_code:
+            airport = await session.scalar(select(Airport).where(Airport.code == airport_code.upper()))
+            if airport is None:
+                return []
+            query = query.where(ParkingSnapshot.airport_id == airport.id)
+
+        return (await session.execute(query)).scalars().all()
+
+    async def _load_snapshot_rows(
+        session: AsyncSession,
+        airport_code: str | None,
+        parking_lot_id: int | None,
+        days: int,
+    ) -> list[tuple[ParkingSnapshot, ParkingLot, Airport]]:
+        cutoff = now_utc() - timedelta(days=days)
+        query = (
+            select(ParkingSnapshot, ParkingLot, Airport)
+            .join(ParkingLot, ParkingLot.id == ParkingSnapshot.parking_lot_id)
+            .join(Airport, Airport.id == ParkingSnapshot.airport_id)
+            .where(ParkingSnapshot.observed_at >= cutoff)
+        )
+        if parking_lot_id:
+            query = query.where(ParkingSnapshot.parking_lot_id == parking_lot_id)
+        elif airport_code:
+            query = query.where(Airport.code == airport_code.upper())
+        return (await session.execute(query)).all()
+
+    return app
+
+
+async def _run_scheduler(app: FastAPI) -> None:
+    session_factory: async_sessionmaker[AsyncSession] = app.state.session_factory
+    service: CollectionService = app.state.collection_service
+    settings: Settings = app.state.settings
+
+    while True:
+        async with session_factory() as session:
+            try:
+                summary = await service.collect(session, trigger="scheduler")
+                logger.info(
+                    "scheduler tick completed run_id=%s status=%s client_mode=%s raw=%s snapshots=%s fee_rules=%s",
+                    summary["collection_run_id"],
+                    summary["status"],
+                    summary["client_mode"],
+                    summary["raw_response_count"],
+                    summary["snapshot_count"],
+                    summary["fee_rule_count"],
+                )
+            except Exception:
+                await session.rollback()
+                logger.exception("scheduler tick failed")
+        await asyncio.sleep(settings.collect_interval_seconds)
+
+
+async def _load_collection_run_statuses(
+    session: AsyncSession,
+    limit: int = 5,
+) -> list[CollectionRunStatus]:
+    runs = (
+        await session.execute(
+            select(CollectionRun).order_by(CollectionRun.started_at.desc(), CollectionRun.id.desc()).limit(limit)
+        )
+    ).scalars().all()
+    if not runs:
+        return []
+
+    run_ids = [run.id for run in runs]
+    raw_counts = {
+        collection_run_id: count
+        for collection_run_id, count in (
+            await session.execute(
+                select(RawApiResponse.collection_run_id, func.count(RawApiResponse.id))
+                .where(RawApiResponse.collection_run_id.in_(run_ids))
+                .group_by(RawApiResponse.collection_run_id)
+            )
+        ).all()
+    }
+    snapshot_counts = {
+        collection_run_id: count
+        for collection_run_id, count in (
+            await session.execute(
+                select(ParkingSnapshot.collection_run_id, func.count(ParkingSnapshot.id))
+                .where(ParkingSnapshot.collection_run_id.in_(run_ids))
+                .group_by(ParkingSnapshot.collection_run_id)
+            )
+        ).all()
+    }
+
+    return [
+        CollectionRunStatus(
+            id=run.id,
+            started_at=serialize_utc(run.started_at),
+            finished_at=serialize_utc(run.finished_at) if run.finished_at else None,
+            status=run.status,
+            trigger=run.trigger,
+            error_message=run.error_message,
+            raw_response_count=raw_counts.get(run.id, 0),
+            snapshot_count=snapshot_counts.get(run.id, 0),
+        )
+        for run in runs
+    ]
+
+
+async def _load_latest_snapshot_metadata(session: AsyncSession) -> dict[str, object | None]:
+    latest_observed_at = await session.scalar(select(func.max(ParkingSnapshot.observed_at)))
+    latest_collected_at = await session.scalar(select(func.max(ParkingSnapshot.collected_at)))
+    return {
+        "observed_at": latest_observed_at,
+        "collected_at": latest_collected_at,
+    }
+
+
+app = create_app()

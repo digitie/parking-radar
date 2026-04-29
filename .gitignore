@@ -1,0 +1,16 @@
+.pytest_cache/
+__pycache__/
+.coverage
+*.pyc
+*.pyo
+*.sqlite3
+.next/
+node_modules/
+coverage/
+dist/
+.DS_Store
+data/
+!data/.gitkeep
+.env
+.env.*
+!.env.example
