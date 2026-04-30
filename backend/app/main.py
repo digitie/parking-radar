@@ -406,6 +406,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     ),
                 )
         summary = await service.collect(session, trigger="manual")
+        if summary["status"] == "failed":
+            rate_limit_state = await service.get_upstream_rate_limit_state(session)
+            if rate_limit_state.is_blocked and rate_limit_state.blocked_until is not None:
+                blocked_until_kst = to_seoul(rate_limit_state.blocked_until).strftime("%Y-%m-%d %H:%M:%S KST")
+                raise HTTPException(
+                    status_code=429,
+                    detail=(
+                        "공공데이터 API 요청 한도에 도달해 현재 수집을 잠시 멈췄습니다. "
+                        f"{blocked_until_kst} 이후에 다시 시도해 주세요."
+                    ),
+                )
+            raise HTTPException(
+                status_code=502,
+                detail=summary["errors"][0] if summary["errors"] else "수집 실행에 실패했습니다.",
+            )
         return CollectionSummary(**summary)
 
     @app.get("/admin/collector-status", response_model=CollectorStatusResponse)

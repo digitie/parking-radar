@@ -95,6 +95,7 @@ SEED_SAMPLE_DATA=false
 USE_SAMPLE_CLIENT_WHEN_NO_KEY=false
 COLLECT_INTERVAL_SECONDS=1200
 MANUAL_COLLECT_MIN_INTERVAL_SECONDS=1200
+UPSTREAM_RATE_LIMIT_BACKOFF_SECONDS=3600
 DATA_GO_KR_SERVICE_KEY=...
 ```
 
@@ -104,7 +105,8 @@ DATA_GO_KR_SERVICE_KEY=...
 - 그래서 ODROID live 프로파일은 10분이 아니라 20분(`1200초`) 주기와 20분 수동 수집 제한으로 운영한다.
 - 같은 인증키를 쓰는 live 수집기는 동시에 하나만 유지한다.
 - 빠른 검증용 live 스택을 잠깐 띄웠다면 검증 직후 반드시 내려야 한다.
-- 수집기가 한도 초과를 감지하면 다음 KST 자정 5분 뒤까지 API 호출을 건너뛰고, `collector-status`에 `upstream_rate_limited=true`와 `upstream_rate_limited_until`을 남긴다.
+- 수집기가 한도 초과를 감지하면 `UPSTREAM_RATE_LIMIT_BACKOFF_SECONDS` 동안 API 호출을 잠시 건너뛰고, `collector-status`에 `upstream_rate_limited=true`와 `upstream_rate_limited_until`을 남긴다.
+- `15056803` 공식 문서상 개발계정 트래픽은 `5,000/일`이지만, 실제 운영에서는 더 이르게 `LIMITED NUMBER OF SERVICE REQUESTS EXCEEDS ERROR.`가 발생할 수 있으므로 하루 단위 정지 대신 짧은 backoff 후 재시도한다.
 
 동작 방식:
 

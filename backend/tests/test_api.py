@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 from zoneinfo import ZoneInfo
 
 from fastapi.testclient import TestClient
@@ -43,9 +44,10 @@ async def insert_collection_run(
     status: str,
     trigger: str,
     error_message: str | None,
+    started_at: datetime | None = None,
 ) -> None:
     session_factory = client.app.state.session_factory
-    started_at = now_utc() - timedelta(minutes=1)
+    started_at = started_at or (now_utc() - timedelta(minutes=1))
     finished_at = started_at + timedelta(seconds=1)
     async with session_factory() as session:
         session.add(
@@ -250,5 +252,92 @@ def test_admin_collect_returns_upstream_rate_limit_error(tmp_path: Path) -> None
         )
 
         response = client.post("/admin/collect")
+        assert response.status_code == 429
+        assert "공공데이터 API 요청 한도" in response.json()["detail"]
+
+
+def test_admin_collector_status_does_not_extend_rate_limit_from_skipped_runs(tmp_path: Path) -> None:
+    with build_client(
+        tmp_path,
+        data_go_kr_service_key="test-key",
+        use_sample_client_when_no_key=False,
+        seed_sample_data=False,
+    ) as client:
+        expired_failed_at = now_utc() - timedelta(days=2)
+        recent_skipped_at = now_utc() - timedelta(minutes=5)
+        asyncio.run(
+            insert_collection_run(
+                client,
+                status="failed",
+                trigger="scheduler",
+                error_message="kac_parking API error 99: LIMITED NUMBER OF SERVICE REQUESTS EXCEEDS ERROR.",
+                started_at=expired_failed_at,
+            )
+        )
+        asyncio.run(
+            insert_collection_run(
+                client,
+                status="skipped",
+                trigger="scheduler",
+                error_message=(
+                    "kac_parking upstream rate limit active until 2099-01-01T00:05:00Z: "
+                    "kac_parking API error 99: LIMITED NUMBER OF SERVICE REQUESTS EXCEEDS ERROR."
+                ),
+                started_at=recent_skipped_at,
+            )
+        )
+
+        response = client.get("/admin/collector-status")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["upstream_rate_limited"] is False
+        assert payload["upstream_rate_limited_until"] is None
+
+
+def test_admin_collect_raises_429_when_collection_fails_due_to_rate_limit(tmp_path: Path) -> None:
+    with build_client(
+        tmp_path,
+        data_go_kr_service_key="test-key",
+        use_sample_client_when_no_key=False,
+        seed_sample_data=False,
+    ) as client:
+        service = client.app.state.collection_service
+        unblocked_state = type(
+            "State",
+            (),
+            {
+                "is_blocked": False,
+                "blocked_until": None,
+            },
+        )()
+        blocked_state = type(
+            "State",
+            (),
+            {
+                "is_blocked": True,
+                "blocked_until": now_utc() + timedelta(hours=1),
+            },
+        )()
+        with patch.object(
+            service,
+            "collect",
+            new=AsyncMock(
+                return_value={
+                    "collection_run_id": 1,
+                    "status": "failed",
+                    "client_mode": "live",
+                    "raw_response_count": 1,
+                    "snapshot_count": 0,
+                    "fee_rule_count": 0,
+                    "errors": ["kac_parking API error 99: LIMITED NUMBER OF SERVICE REQUESTS EXCEEDS ERROR."],
+                }
+            ),
+        ), patch.object(
+            service,
+            "get_upstream_rate_limit_state",
+            new=AsyncMock(side_effect=[unblocked_state, blocked_state]),
+        ):
+            response = client.post("/admin/collect")
+
         assert response.status_code == 429
         assert "공공데이터 API 요청 한도" in response.json()["detail"]

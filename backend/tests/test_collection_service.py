@@ -11,7 +11,7 @@ from app.services.collection import (
     FixturePublicDataClient,
     LivePublicDataClient,
     build_public_data_client,
-    compute_upstream_rate_limit_reset_at,
+    compute_upstream_rate_limit_retry_at,
     is_upstream_rate_limit_error,
     normalize_upstream_rate_limit_error,
     validate_source_response_body,
@@ -97,12 +97,12 @@ def test_is_upstream_rate_limit_error_detects_quota_message() -> None:
     assert not is_upstream_rate_limit_error("kac_parking API error 99: SERVICE ACCESS DENIED ERROR.")
 
 
-def test_compute_upstream_rate_limit_reset_at_uses_next_kst_midnight() -> None:
+def test_compute_upstream_rate_limit_retry_at_uses_backoff_seconds() -> None:
     reference_at = datetime(2026, 4, 29, 8, 18, 2, tzinfo=ZoneInfo("UTC"))
 
-    blocked_until = compute_upstream_rate_limit_reset_at(reference_at, "Asia/Seoul")
+    blocked_until = compute_upstream_rate_limit_retry_at(reference_at, 3600)
 
-    assert blocked_until == datetime(2026, 4, 29, 15, 5, 0, tzinfo=ZoneInfo("UTC"))
+    assert blocked_until == datetime(2026, 4, 29, 9, 18, 2, tzinfo=ZoneInfo("UTC"))
 
 
 def test_normalize_upstream_rate_limit_error_strips_nested_skip_prefix() -> None:

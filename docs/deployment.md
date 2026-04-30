@@ -22,6 +22,7 @@ SEED_SAMPLE_DATA=false
 USE_SAMPLE_CLIENT_WHEN_NO_KEY=false
 COLLECT_INTERVAL_SECONDS=1200
 MANUAL_COLLECT_MIN_INTERVAL_SECONDS=1200
+UPSTREAM_RATE_LIMIT_BACKOFF_SECONDS=3600
 DATA_GO_KR_SERVICE_KEY=...
 ```
 
@@ -43,7 +44,9 @@ DATA_GO_KR_SERVICE_KEY=...
 - `15056803` 카탈로그의 개발계정 트래픽 표기와 별개로, ODROID 실측에서는 100회 성공 후 101번째부터 제한 에러가 재현됐다.
 - 그래서 ODROID live와 local live 검증 스택은 10분이 아니라 20분 주기를 기본값으로 둔다.
 - 같은 인증키를 쓰는 live 수집기는 동시에 하나만 유지한다.
-- live 수집기가 한도 초과를 감지하면 다음 KST 자정 5분 뒤까지 API 호출을 건너뛴다.
+- live 수집기가 한도 초과를 감지하면 `UPSTREAM_RATE_LIMIT_BACKOFF_SECONDS` 동안 API 호출을 건너뛴다.
+- `15056803` 공식 문서상 개발계정 트래픽은 `5,000/일`이지만, 실제 운영에서는 더 이르게 `LIMITED NUMBER OF SERVICE REQUESTS EXCEEDS ERROR.`가 발생할 수 있다.
+- 그래서 ODROID live는 하루 단위로 멈추지 않고, 짧은 backoff 뒤 다시 시도해 회복 시점을 놓치지 않도록 한다.
 
 ## ODROID M1S 배포 파일
 

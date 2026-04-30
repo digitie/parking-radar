@@ -3,10 +3,9 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from datetime import datetime, time, timedelta
+from datetime import datetime, timedelta
 from typing import Any
 from xml.etree import ElementTree
-from zoneinfo import ZoneInfo
 
 import httpx
 from sqlalchemy import select
@@ -22,7 +21,6 @@ KAC_PARKING_ENDPOINT = "http://openapi.airport.co.kr/service/rest/AirportParking
 INCHEON_PARKING_ENDPOINT = "http://apis.data.go.kr/B551177/StatusOfParking/getTrackingParking"
 KAC_FEE_ENDPOINT = "http://openapi.airport.co.kr/service/rest/AirportParkingFee/parkingfee"
 UPSTREAM_RATE_LIMIT_MARKER = "LIMITED NUMBER OF SERVICE REQUESTS EXCEEDS ERROR."
-UPSTREAM_RATE_LIMIT_RESET_GRACE_MINUTES = 5
 
 logger = logging.getLogger(__name__)
 
@@ -277,16 +275,8 @@ def normalize_upstream_rate_limit_error(message: str | None) -> str:
     return f"kac_parking API error 99: {UPSTREAM_RATE_LIMIT_MARKER}"
 
 
-def compute_upstream_rate_limit_reset_at(reference_at: datetime, tz_name: str) -> datetime:
-    timezone = ZoneInfo(tz_name)
-    local_reference = serialize_utc(reference_at).astimezone(timezone)
-    next_day = local_reference.date() + timedelta(days=1)
-    retry_local = datetime.combine(
-        next_day,
-        time(hour=0, minute=UPSTREAM_RATE_LIMIT_RESET_GRACE_MINUTES),
-        tzinfo=timezone,
-    )
-    return retry_local.astimezone(ZoneInfo("UTC"))
+def compute_upstream_rate_limit_retry_at(reference_at: datetime, backoff_seconds: int) -> datetime:
+    return serialize_utc(reference_at) + timedelta(seconds=max(backoff_seconds, 0))
 
 
 class CollectionService:
@@ -312,14 +302,17 @@ class CollectionService:
             return UpstreamRateLimitState(is_blocked=False)
 
         latest_run = await session.scalar(
-            select(CollectionRun).order_by(CollectionRun.started_at.desc(), CollectionRun.id.desc()).limit(1)
+            select(CollectionRun)
+            .where(CollectionRun.status != "skipped")
+            .order_by(CollectionRun.started_at.desc(), CollectionRun.id.desc())
+            .limit(1)
         )
         if latest_run is None or not is_upstream_rate_limit_error(latest_run.error_message):
             return UpstreamRateLimitState(is_blocked=False)
 
-        blocked_until = compute_upstream_rate_limit_reset_at(
+        blocked_until = compute_upstream_rate_limit_retry_at(
             latest_run.started_at,
-            self.settings.app_timezone,
+            self.settings.upstream_rate_limit_backoff_seconds,
         )
         if now_utc() >= blocked_until:
             return UpstreamRateLimitState(is_blocked=False)

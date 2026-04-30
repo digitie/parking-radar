@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     seed_sample_data: bool = True
     collect_interval_seconds: int = 300
     manual_collect_min_interval_seconds: int = 300
+    upstream_rate_limit_backoff_seconds: int = 3600
     api_timeout_seconds: int = 15
     data_go_kr_service_key: str | None = None
     enable_incheon_collection: bool = False

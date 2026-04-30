@@ -158,4 +158,6 @@ docker compose up -d frontend
 - `collector-status`에서 `upstream_rate_limited=true`와 `upstream_rate_limited_until`을 확인한다.
 - 같은 인증키를 쓰는 다른 live 검증 스택이 떠 있지 않은지 먼저 확인한다.
 - 특히 `parking-radar-live` 같은 임시 검증 스택이 짧은 주기로 남아 있으면 쿼터를 빠르게 소진한다.
-- 한도 초과가 기록된 뒤에는 수집기가 다음 KST 자정 5분 뒤까지 자동으로 API 호출을 건너뛴다.
+- 한도 초과가 기록된 뒤에는 수집기가 `UPSTREAM_RATE_LIMIT_BACKOFF_SECONDS` 동안 자동으로 API 호출을 건너뛴다.
+- `15056803`은 공식 문서상 개발계정 `5,000/일`이 보이더라도 실제 운영에서 더 이르게 `LIMITED NUMBER OF SERVICE REQUESTS EXCEEDS ERROR.`가 날 수 있다.
+- 하루가 끝날 때까지 멈추게 두지 말고, 짧은 backoff 뒤 다시 시도해서 회복 시점을 확인한다.
